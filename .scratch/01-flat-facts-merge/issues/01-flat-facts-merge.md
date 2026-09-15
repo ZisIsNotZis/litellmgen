@@ -65,14 +65,37 @@ Gate = the script runs and its output is inspected; the module has no test runne
 | Command | Result |
 | --- | --- |
 | `python3 litellmgen.py` | exit 0; `[volcengine] backup=12 catalog=12 endpoint=0 user=12 -> 24`, `[github_copilot] 33/33/0/16 -> 47`, `[deepseek] 10/10/0/0 -> 10`, `[siemens] 0/0/25/0 -> 25`, `[zai] 16/16/0/0 -> 16`; 388 entries (was 388), 269,706 → 145,616 bytes |
-| output key census | only flat keys: `mode` 214, `max_input_tokens` 212, `max_tokens` 180, `max_output_tokens` 166, `supports_*` …, `tiered_pricing` 32; `features`/`modalities`/`task_type`/`token_limits` **absent**; 0 empty-dict values |
-| fabricated-`false` check | `siemens` = 25 entries, `model_info` `{}` in all of them, 0 with `supports_vision` (was `false` in 25) |
-| `litellm --config ~/litellm.yml --port 4001` | ready in 9s, `GET /health/readiness` 200 |
+| output key census | only flat keys: `mode` 214, `max_input_tokens` 212, `max_tokens` 180, `max_output_tokens` 166, `supports_*` …, `tiered_pricing` 32; `features`/`modalities`/`task_type`/`token_limits` **absent** |
+| fabricated-`false` check | `siemens` = 25 entries, `model_info` `{}` in all of them, 0 with `supports_vision` (was `false` in 25). 174/388 entries carry `model_info: {}` — models whose names appear in no fact source (siemens's 25, volcengine's 12 and github_copilot's 16 user-listed names × their keys × 2 aliases) |
+| drift check: litellm-declared `model_info` fields present in the sources but not declared | `[]` — all 35 declared fields cover them (round 2 had left `supports_output_config` out; now emitted on 2 entries) |
+| `python3 litellmgen.py` with the catalog host pointed at a dead port (`/tmp/litellmgen.degraded.py`) | every group printed `!! [name] catalog source unavailable: ClientConnectorError`, then `backup=… catalog=0 …`; still wrote 388 entries, `deepseek/deepseek-chat` kept its limits from source 1 |
+| user `cfg.models` `0.0` cost + explicit override (`/tmp/lm.test.yml`) | `deepseek-chat: {input_cost_per_token: 0.0}` → emitted `2.8e-07` (catalog kept); `deepseek-reasoner: {max_input_tokens: 999, supports_vision: false}` → `999` / `False` (user wins) |
+| `litellm --config ~/litellm.yml --port 4001` | ready in 1s, `GET /health/readiness` 200, 0 error lines in `/tmp/litellm4001.log` |
 | hello per group | `deepseek/deepseek-chat` 200 · `zai/glm-5` 200 · `volcengine/ark-code-latest` 200 · `volcengine/doubao-seed-2-0-pro-260215` 200 · `siemens/bge-m3` embeddings 200 (dim 1024) · `github_copilot` 400, pre-existing → ticket 02 |
 
-Residual: the port-4000 proxy still holds the pre-change config in memory; it picks the new one up
-on restart. Proxy on 4001 (`pid 834918`, log `/tmp/litellm4001.log`) left running for the user's own
+Residuals: the port-4000 proxy still holds the pre-change config in memory and picks the new one up on
+restart; the proxy on 4001 (`pid 839737`, log `/tmp/litellm4001.log`) is left running for the user's own
 poking.
+
+## Review record (need-review)
+
+- Reviewer 1 (fresh context, adversarial code review; change = commit `2210d37`, diff hash
+  `e1464026741f3ef2`): verdict **reject** — 8 findings, 3 at B. Real: unknown `cfg` keys were never
+  warned about although this ticket decides they must be (grep for `warn` returned 0 hits); the user
+  source bypassed the `0.0`-cost normalization, so a user `0.0` could override a catalog price and
+  mark a paid model free; prefix-stripping collapsed the backup map's duplicate keys last-wins (6
+  pairs for `deepseek`, byte-identical today, order-dependent otherwise). Also: no `raise_for_status`,
+  no per-source isolation, 3 litellm-read fields missing from the declared set.
+- Reviewer 2 (fresh context, fix verification; change = working-tree diff `57af2e46029d6074`): verdict
+  **reject** — the `0.0`-cost and duplicate-key fixes verified FIXED; the status check was added but
+  turned one vendor's catalog failure into an all-or-nothing abort; the declared set was still missing
+  litellm-declared fields (`supports_output_config` present in the sources); the unknown-key warning
+  was placed after the network work, so a failed build suppressed it.
+- All findings fixed: fixes 1-3 in commit 1, the rest in the follow-up commit (per-source `guard()`,
+  warning moved before the network work, 7 more declared fields + the drift check above).
+- Two consecutive rejections is the parking threshold (`R-TKT.2`); no third round was run. The residual
+  judgement call — hand-picked whitelist versus deriving it from litellm's own `ModelInfo` schema — is
+  escalated to the user and tracked in ticket 03, not decided here.
 
 ## Comments
 
