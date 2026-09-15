@@ -112,6 +112,23 @@ So: emit both windows from the doc, and **not** `max_tokens` — that is the fie
 with, and "上下文窗口 / 最大输出" does not map onto it cleanly; it stays sourced from the catalog and the
 shipped map, where it is upstream's own value.
 
+Why the doc's two numbers are complete (asked directly: "shouldn't that be three columns?"): litellm's own
+`sample_spec` calls `max_tokens` a **LEGACY parameter**, "set to max_output_tokens if provider specifies it.
+IF not set to max_input_tokens, if provider specifies it" — a derived alias, not a third measurement.
+Distribution over the 3917 shipped entries: 1037 all three equal, 1920 `max_tokens == max_output_tokens`,
+281 `max_tokens == max_input_tokens`, 676 `max_tokens` absent, and **0** with three independent numbers
+(the three rows a first pass flags are `openrouter/gryphe/mythomax-l2-13b` and `together-ai-8.1b-21b`, which
+set only `max_tokens`, plus `sample_spec` itself).
+
+Leaving it unset for doc-derived aliases is also safe where an error was plausible: an anthropic-style call
+with an unknown model does not fail on a missing `max_tokens` — `get_max_tokens_for_model` falls back to
+`DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS` (`llms/anthropic/chat/transformation.py:334-348`).
+
+Alternative on the table, not taken: fill `max_tokens = max_output_tokens or max_input_tokens` per litellm's
+documented rule so the whole config matches the map convention (2957/3917 entries do). Rejected because it
+gives a prose-derived number the power to silently cap a caller's `max_tokens` (CASE 1/2 above); a loud
+provider error is the better failure when a number is wrong.
+
 1. Implement `docs:` as a fifth source in `litellmgen.py`? Shape:
 
    ```yaml
@@ -152,3 +169,5 @@ filter — plus refuse names the group does not list, which is what kept the pro
   the prototype's output). Traced what litellm does with each field and switched conflict resolution from
   first-wins to **min**, so a documented window is never over-promised; `max_tokens` is explicitly excluded
   from doc patterns.
+- round 4 — agent (pi), 2026-09-15: user asked whether the doc should yield three numbers. Confirmed the doc
+  states two, and that the third is a legacy alias (evidence above) — so nothing is missing. No code change.
