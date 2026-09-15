@@ -72,10 +72,19 @@ Gate = the script runs and its output is inspected; the module has no test runne
 | user `cfg.models` `0.0` cost + explicit override (`/tmp/lm.test.yml`) | `deepseek-chat: {input_cost_per_token: 0.0}` → emitted `2.8e-07` (catalog kept); `deepseek-reasoner: {max_input_tokens: 999, supports_vision: false}` → `999` / `False` (user wins) |
 | `litellm --config ~/litellm.yml --port 4001` | ready in 1s, `GET /health/readiness` 200, 0 error lines in `/tmp/litellm4001.log` |
 | hello per group | `deepseek/deepseek-chat` 200 · `zai/glm-5` 200 · `volcengine/ark-code-latest` 200 · `volcengine/doubao-seed-2-0-pro-260215` 200 · `siemens/bge-m3` embeddings 200 (dim 1024) · `github_copilot` 400, pre-existing → ticket 02 |
+| hello re-run on the confirmed-final server (`pid 842049`, `/model/info` = 388 deployments with the round-2 keys) | `deepseek/deepseek-chat` 200 · `zai/glm-5` 200 · `volcengine/ark-code-latest` 200 · `volcengine/doubao-seed-2-0-pro-260215` 200 · `github_copilot/gpt-5.4` 200 · `siemens/bge-m3` embeddings 200 (dim 1024) · `github_copilot/gpt-5.6-sol` 400 — resolved in ticket 02: that name needs `mode: responses`, and with it the same request answers 200 |
 
 Residuals: the port-4000 proxy still holds the pre-change config in memory and picks the new one up on
-restart; the proxy on 4001 (`pid 839737`, log `/tmp/litellm4001.log`) is left running for the user's own
-poking.
+restart. The 4001 proxy needed a correction — see the note below — and now runs the final artifact as
+`pid 842049` (started 18:53:55, config mtime 18:50:18), log `/tmp/litellm4001.final.log`.
+
+Honesty note on the restart sequence: `litellm`'s CLI forks, so the pid `$!` reports is a parent that
+can be killed while the serving child survives and keeps the port bound. Two of my "restarts" therefore
+printed `ready after 1s` from the *surviving first instance* (started 18:43:00), and their new processes
+exited on `address already in use`. The round-2 hello check above was served by the round-1 config. The
+re-run on the confirmed-final server is the evidence table's last row, and `/model/info` shows 388
+deployments carrying the round-2 keys (`supported_endpoints`, `supports_output_config`,
+`supports_computer_use`, `thinking_always_on`), which is what proves the loaded config is the artifact.
 
 ## Review record (need-review)
 
@@ -103,3 +112,5 @@ poking.
   speak it, none does today, so adapters are flat in / flat out.
 - done — agent (pi), 2026-09-15: rewrite landed; source 1 resurrected (`litellm_provider`), nested
   schema + `insertLimits` deleted, unknown `cfg` keys now warn (they surfaced ticket 02).
+- follow-up — agent (pi), 2026-09-15: ticket 02 closed to `ready-for-human` — `mode` is the fix for the
+  `github_copilot` group (verified 200 with it, 400 without), credentials were a red herring.

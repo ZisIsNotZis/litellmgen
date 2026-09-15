@@ -1,43 +1,76 @@
-# 02 — `github_copilot` group answers no request
+# 02 — `github_copilot` needs per-model `mode`, not a group-level one
 
-- **Status:** needs-triage
+- **Status:** ready-for-human
 - **Blocked by:** none
 - **Assignee/lock:** unclaimed
-- **Need-review:** unknown until triaged
-- **Need-test-cases:** none yet
+- **Need-review:** no (no code change needed for the fix — `lm.yml` carries it)
+- **Need-test-cases:** none (verification was the probes below)
 
 ## Issue
 
 Found while hello-checking the regenerated `~/litellm.yml` (ticket 01). Every request to the
-`github_copilot` model group fails with 400; the other four groups pass. Pre-existing: the old
-generator emitted the same group from the same sources, and it also ignored `lm.yml`'s
-`mode: responses`.
+`github_copilot` group failed with 400 while the other four groups passed. Two candidate causes were
+filed: (1) `lm.yml` asks for `mode: responses`, the generator never read it; (2) credentials.
 
-Observed on port 4001, `~/litellm.yml` from ticket 01:
+**Both settled. Cause 1 confirmed, cause 2 disproven.**
 
-| Request | Result |
+- Credentials exist and work: `~/.config/litellm/github_copilot/{access-token,api-key.json}` are
+  present (litellm's `llms/github_copilot/authenticator.py:32-39` reads that dir), and
+  `POST /v1/responses github_copilot/gpt-5.3-codex` → **200**.
+- `mode` is the routing switch: `gpt-5.6-sol` on `/v1/chat/completions` → 400, and with
+  `models: {gpt-5.6-sol: {mode: responses}}` on `/v1/responses` → **200** (probe proxy on 4002,
+  config `/tmp/litellm.mode.yml`).
+- litellm's shipped map marks only 2 of its 33 `github_copilot` entries `mode: responses` —
+  `gpt-5.1-codex-max`, `gpt-5.3-codex` — both with `supported_endpoints: ["/v1/responses"]`.
+  Everything else it knows (claude-\*, gemini-\*, grok-\*, gpt-\*) is `mode: chat`.
+- The user's 16 hand-listed names are in **no** litellm map (nothing matches `gpt-5.5`/`gpt-5.6`),
+  so litellm cannot know their mode and defaults to chat.
+
+### The upstream error wording is the classifier
+
+`github_copilot` has no `/models`-style discovery and its errors come from the Copilot API verbatim
+(neither string exists in litellm's source), so they can be read directly:
+
+| Upstream message | Meaning |
 | --- | --- |
-| `POST /v1/chat/completions` `github_copilot/gpt-5.6-sol` (user cfg model, facts all unset) | 400 `model "gpt-5.6-sol" is not accessible via the /chat/completions endpoint` |
-| `POST /v1/responses` `github_copilot/gpt-5.6-sol` | 400, same message — litellm routed it to `/chat/completions` anyway, so the deployment's mode is `chat` |
-| `POST /v1/chat/completions` `github_copilot/claude-sonnet-4` (from litellm's cost map) | 400 `The requested model is not supported.` |
+| `model "X" is not accessible via the /chat/completions endpoint` | exists, needs `mode: responses` |
+| `The requested model is not supported.` (`code: model_not_supported`) | not served to this account |
 
-Two candidate causes, not yet separated:
+### Classification of `lm.yml`'s 16 names (4001, `github_copilot/<name>` on `/chat/completions`)
 
-1. **Mode.** `lm.yml` asks for `mode: responses`; `Cfg` never read it and the ticket-01 generator
-   only warns about it, so no `model_info.mode` is emitted and every deployment defaults to chat.
-   litellm's own cost map has `mode: responses` for 2 of its 33 `github_copilot` entries, so the
-   mechanism exists — those 16 user models are private names litellm cannot know about.
-2. **Credential/entitlement.** No copilot token appears in the proxy process environment, and the
-   upstream rejects even cost-map-known models.
+| Needs `mode: responses` (8) | Chat already works (4) | Not served (2) | Unclear (2) |
+| --- | --- | --- | --- |
+| `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-5.5`, `gpt-5.4-mini`, `grok-4.5`, `gpt-5.3-codex` | `gpt-5.4`, `gpt-5-mini`, `gemini-3.8-flash`, `gemini-3.5-flash` | `auto`, `hydrafusion` | `gemini-3.7-flash`, `gemini-3.6-flash` — `Invalid request format: litellm.InternalServerError` |
 
-## Acceptance criteria (to settle at triage)
+## Fix (no code change needed)
 
-- [ ] Cause 1 vs 2 decided with evidence, not inference.
-- [ ] If mode: `Cfg` gains the field it declares in `lm.yml`, emitted into `model_info`.
-- [ ] If credentials: how the group is meant to authenticate is written down in `WORKSPACE.md`.
-- [ ] One passing hello against the group, or the group removed from `lm.yml` as `wontfix`.
+Per-model, in `lm.yml` — the rewritten generator passes arbitrary flat keys through `Facts`:
+
+```yaml
+github_copilot:
+  keys: []
+  models:
+    gpt-5.6-sol: {mode: responses, supported_endpoints: [/v1/responses]}
+```
+
+Verified emission: `{"mode": "responses", "supported_endpoints": ["/v1/responses"]}` in
+`model_info`, and the probe above answers 200 through a proxy started on that config.
+
+## Question for the user
+
+- Drop the 2 not-served names, or keep them as intent-to-use-when-available? They currently make the
+  group fail random requests under `simple-shuffle`.
+- Is a group-level `mode` worth implementing in `Cfg` (3 lines), or is per-model the right shape?
+  Author's lean: per-model only — this group mixes responses-only, chat-only and one embedding model,
+  so a group-level switch would misroute whichever half it is not set to.
+- Worth a probe helper that classifies a name list through the error wording above, so the split is
+  re-derivable instead of hand-maintained?
 
 ## Comments
 
-- needs-triage — agent (pi), 2026-09-15: filed from a hello check; no investigation beyond the
-  three requests above.
+- needs-triage — agent (pi), 2026-09-15: filed from a hello check; three requests only.
+- ready-for-human — agent (pi), 2026-09-15: causes separated with the probes above. `mode` is the
+  fix, credentials were never the problem; the residue is a product call about the model list.
+- Correction to what ticket 01's first report said: it claimed cause 2 was likely because no copilot
+  token appeared in the proxy *environment*. The token is on disk, not in the environment, so that
+  observation was worthless.
