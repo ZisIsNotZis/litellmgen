@@ -1,6 +1,6 @@
 # 02 — `github_copilot` needs per-model `mode`, not a group-level one
 
-- **Status:** ready-for-human
+- **Status:** done
 - **Blocked by:** none
 - **Assignee/lock:** unclaimed
 - **Need-review:** no (no code change needed for the fix — `lm.yml` carries it)
@@ -42,29 +42,44 @@ filed: (1) `lm.yml` asks for `mode: responses`, the generator never read it; (2)
 | --- | --- | --- | --- |
 | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-5.5`, `gpt-5.4-mini`, `grok-4.5`, `gpt-5.3-codex` | `gpt-5.4`, `gpt-5-mini`, `gemini-3.8-flash`, `gemini-3.5-flash` | `auto`, `hydrafusion` | `gemini-3.7-flash`, `gemini-3.6-flash` — `Invalid request format: litellm.InternalServerError` |
 
-## Fix (no code change needed)
+## Fix (applied, no code change needed)
 
-Per-model, in `lm.yml` — the rewritten generator passes arbitrary flat keys through `Facts`:
+Per-model, in `lm.yml` — the rewritten generator passes arbitrary flat keys through `Facts`. Applied
+2026-09-15 (file kept out of the repo: it holds live API keys, core I7):
 
 ```yaml
 github_copilot:
-  keys: []
   models:
-    gpt-5.6-sol: {mode: responses, supported_endpoints: [/v1/responses]}
+    gpt-5.6-sol: {mode: responses, supported_endpoints: [/v1/responses]}   # + 6 more responses-only names
+    gpt-5.4: {}                                                          # chat, left unset
+  keys: []
 ```
 
-Verified emission: `{"mode": "responses", "supported_endpoints": ["/v1/responses"]}` in
-`model_info`, and the probe above answers 200 through a proxy started on that config.
+The group-level `mode: responses` was deleted: it was never read, and is the wrong shape for a mixed group.
+Verified emission: `{"mode": "responses", "supported_endpoints": ["/v1/responses"]}`.
+
+## Verification (proxy on 4001, `lm.yml` regenerated into `~/litellm.yml`)
+
+| Endpoint | Result |
+| --- | --- |
+| `/v1/responses` — the 8 responses-only names | **8/8 → 200** (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-5.5`, `gpt-5.4-mini`, `gpt-5.3-codex`, `grok-4.5`) |
+| `/v1/chat/completions` — the chat names | **6/6 → 200** (`gpt-5.4`, `gpt-5-mini`, `gemini-3.8/3.7/3.6/3.5-flash`) |
+| `auto`, `hydrafusion` | 400 `model_not_supported` — **expected**: the user confirmed these are blocked for the account |
+
+Two corrections to this ticket's earlier reporting: the gemini-3.7/3.6-flash 400s filed as "unclear" were a
+transient `InternalServerError` and both answer 200; and the earlier method (asking `/chat/completions` about
+a `mode: responses` deployment) is itself invalid — litellm correctly refuses to bridge chat → responses, so
+those models are reachable on `/v1/responses` only.
+
+## Answered
+
+- Keep the blocked names: yes, they are blocked for the account and that is fine.
+- Group-level `mode` in `Cfg`: not wanted — per-model is the right shape.
 
 ## Question for the user
 
-- Drop the 2 not-served names, or keep them as intent-to-use-when-available? They currently make the
-  group fail random requests under `simple-shuffle`.
-- Is a group-level `mode` worth implementing in `Cfg` (3 lines), or is per-model the right shape?
-  Author's lean: per-model only — this group mixes responses-only, chat-only and one embedding model,
-  so a group-level switch would misroute whichever half it is not set to.
-- Worth a probe helper that classifies a name list through the error wording above, so the split is
-  re-derivable instead of hand-maintained?
+Whether to keep the 2 blocked names as intent, and whether a probe helper is worth having. Both are
+optional; nothing depends on them. Ticket 04 covers the doc-source idea for the facts litellm cannot know.
 
 ## Comments
 
@@ -74,3 +89,5 @@ Verified emission: `{"mode": "responses", "supported_endpoints": ["/v1/responses
 - Correction to what ticket 01's first report said: it claimed cause 2 was likely because no copilot
   token appeared in the proxy *environment*. The token is on disk, not in the environment, so that
   observation was worthless.
+- done — agent (pi), 2026-09-15: `lm.yml` updated and verified; the account-blocked names are confirmed
+  fine. Facts beyond what litellm's own sources carry are ticket 04's concern.
