@@ -78,13 +78,39 @@ Six patterns, all in YAML, zero provider knowledge in the code:
 
 | | |
 | --- | --- |
-| covered (**10/12**) | `doubao-seed-evolving` 1024000/256000 · `minimax-m3` 1024000/128000/vision · `glm-5.3` 1024000/128000 · `glm-5.3-flash` 1024000/128000/vision · `deepseek-v4-flash` 1024000/384000 · `deepseek-v4-pro` 1024000/384000 · `kimi-k3` 1000000/128000/vision · `kimi-k2.7-code` 256000/32000/vision · `doubao-seed-2.1-turbo` vision · `doubao-seed-2.0-lite` vision |
+| covered (**10/12**), after the min-on-conflict rule | `doubao-seed-evolving` 1000000/256000 · `minimax-m3` 1024000/128000/vision · `glm-5.3` 1000000/128000 · `glm-5.3-flash` 1000000/128000/vision · `deepseek-v4-flash` 1000000/384000 · `deepseek-v4-pro` 1000000/384000 · `kimi-k3` 1000000/128000/vision · `kimi-k2.7-code` 256000/32000/vision · `doubao-seed-2.1-turbo` vision · `doubao-seed-2.0-lite` vision |
 | uncovered (2) | `ark-code-latest`, `glm-latest` — router aliases the doc never describes; nothing to extract |
 | noise | none — the group-list guard refused every component id and stray word |
 
 Matches the facts the user asserted by hand: `glm-5.3` ≈1M context, `glm-5.3-flash` multimodal.
 
-## Decisions needed
+## Which numbers are load-bearing (probed in litellm's source, not assumed)
+
+Mapping, matching litellm's own convention (`gpt-4o` = 128000/16384, `claude-sonnet-4-5` = 200000/64000):
+
+| doc says | field | how the doc binds it |
+| --- | --- | --- |
+| `上下文窗口：1024k` | `max_input_tokens` | explicit name, or forward bind |
+| `最大输出长度（包含思维链）：32k` | `max_output_tokens` | explicit name |
+| `支持 1M 上下文窗口` / `并拥有 100 万 token 上下文窗口` | `max_input_tokens` | name list, or forward bind |
+
+What litellm does with them — the risk is mostly **silent rewriting**, not a clean error:
+
+- `max_tokens` (cost-map, seeded from a deployment's `model_info` by `main.py:1195`
+  `_build_custom_pricing_entry`) → `litellm.get_max_tokens()` (`utils.py:5202`) →
+  `token_counter.get_modified_max_tokens` (`litellm_core_utils/token_counter.py:77-117`) rewrites the
+  client's `max_tokens` down when input + output can't both fit (CASE 1, triggered when the cost map's
+  `max_tokens == max_input_tokens`) or when it exceeds the model's output cap (CASE 2). The Anthropic
+  transformation *defaults* a request's `max_tokens` from it (`llms/anthropic/chat/transformation.py:343`).
+- `max_input_tokens` → embedding-input truncation (`router.py:10290-10306`, whose docstring warns that the
+  caller "truncates an embedding input to this value"), the CASE 1 comparison, and pre-call filtering when
+  `enable_pre_call_checks` is on — **default `False`** (`router.py:732`) and not set in `~/litellm.yml`.
+- Too **large** a value is the one that reaches the provider and errors there, because litellm passes the
+  request through on our number's authority.
+
+So: emit both windows from the doc, and **not** `max_tokens` — that is the field litellm rewrites requests
+with, and "上下文窗口 / 最大输出" does not map onto it cleanly; it stays sourced from the catalog and the
+shipped map, where it is upstream's own value.
 
 1. Implement `docs:` as a fifth source in `litellmgen.py`? Shape:
 
@@ -101,10 +127,11 @@ Matches the facts the user asserted by hand: `glm-5.3` ≈1M context, `glm-5.3-f
 
    The URL in `lm.yml` has to be the JSON API one — the console URL cannot be resolved to it generically,
    and the user's constraint is that nothing provider-specific lives in the script.
-2. Precedence: first match wins, or last (i.e. patterns ordered as a priority list like the sources)?
-   Author's lean: **first match wins**, patterns ordered most-specific-first — the same "declared order is
-   the priority" idiom the four existing sources already use. This decides `doubao-seed-evolving`
-   (1024000 from the per-model rule vs 1000000 from the name-list rule).
+2. Precedence on conflicting patterns: **min**, not first/last. Two patterns give `doubao-seed-evolving`
+   1000000 and 1024000; the conservative pick keeps litellm from rewriting a request upward on a number the
+   vendor may not honour. (Measured: it changes `doubao-seed-evolving`, `glm-5.3`, `glm-5.3-flash`,
+   `deepseek-v4-flash`, `deepseek-v4-pro`, `kimi-k3` to 1000000; `minimax-m3` has one source and keeps
+   1024000.)
 3. Positional prose (shape C): **answered — keep it.** The user requires modality, and the forward-bind rule
    (nearest name from the group's own list, within a declared window) covers it in one rule.
 4. Missing 2/12: acceptable — both are router aliases the doc does not describe. Treat the doc source as
@@ -121,3 +148,7 @@ filter — plus refuse names the group does not list, which is what kept the pro
 - round 2 — agent (pi), 2026-09-15: modality added at the user's request; forward-bind rule designed and
   measured (10/12). Prototype at `/tmp/docproto/{source.yml,engine.py}` — still throwaway, nothing landed.
   Waiting on the go for decision 1 before touching `litellmgen.py`.
+- round 3 — agent (pi), 2026-09-15: input/output windows added at the user's request (both were already in
+  the prototype's output). Traced what litellm does with each field and switched conflict resolution from
+  first-wins to **min**, so a documented window is never over-promised; `max_tokens` is explicitly excluded
+  from doc patterns.
