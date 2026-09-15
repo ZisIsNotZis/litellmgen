@@ -1,6 +1,6 @@
 # 04 — Fifth source: facts from a vendor doc page
 
-- **Status:** ready-for-human
+- **Status:** done
 - **Blocked by:** none
 - **Assignee/lock:** unclaimed
 - **Need-review:** yes if implemented (new config surface + a new source in the merge)
@@ -129,7 +129,9 @@ documented rule so the whole config matches the map convention (2957/3917 entrie
 gives a prose-derived number the power to silently cap a caller's `max_tokens` (CASE 1/2 above); a loud
 provider error is the better failure when a number is wrong.
 
-1. Implement `docs:` as a fifth source in `litellmgen.py`? Shape:
+## Decisions (all answered; `go` given 2026-09-15)
+
+1. Implement `docs:` as a fifth source in `litellmgen.py`? — **yes**. Shape:
 
    ```yaml
    volcengine:
@@ -157,6 +159,16 @@ provider error is the better failure when a number is wrong.
 Honest cost: prose regexes rot silently when the vendor edits the page. Mitigation to build in: print each
 pattern's hit count per run, like the per-source counts that exposed the dead `provider`/`litellm_provider`
 filter — plus refuse names the group does not list, which is what kept the prototype noise-free.
+
+## Outcome
+
+Implemented the same day in ticket 05, which carries the code summary, the gate evidence and the review
+record. Result: 10 of the 12 coding-plan models get doc-sourced `max_input_tokens` / `max_output_tokens` /
+`supports_vision`, `ark-code-latest` and `glm-latest` get nothing (router aliases the page never describes),
+and no other provider's entries changed.
+
+Known cost, accepted: prose regexes rot when the vendor edits the page — mitigated by per-rule hit counts and
+complaints printed on every run.
 
 ## Comments
 

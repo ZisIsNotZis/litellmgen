@@ -13,10 +13,11 @@ overwrites a value, and `exclude_none` keeps it out of the output.
 """
 
 from asyncio import gather, new_event_loop
+import re
 from collections.abc import Awaitable, Iterable
-from json import load
+from json import load, loads
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar, get_args
 
 from aiohttp import ClientSession, ClientTimeout
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -80,6 +81,41 @@ class Facts(BaseModel):
     supported_endpoints: list[str]|None = None
 
 
+# litellm rewrites a caller's `max_tokens` from this legacy cost-map field (token_counter.py), so it is
+# never prose-derived: a misread page must not be able to silently cap a request.
+DERIVED_ONLY = ('max_tokens',)
+
+# Flag fields take `True` from a rule with no `value` capture; every other field must capture a number.
+BOOL_FIELDS = frozenset(name for name, field in Facts.model_fields.items() if bool in get_args(field.annotation))
+
+
+class Pattern(BaseModel):
+    """One extraction rule: `field` gets the captured `value` (or True) for the names the rule captures.
+
+    Strict, like `Doc`: a misspelled key is a config error rather than a silently ignored one, since a
+    dropped `bind` would look exactly like a dead pattern.
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    field: str
+    pattern: str
+    bind: Literal['forward']|None = None    # bind to the nearest name the group lists when nothing is captured
+    window: int = 400
+
+
+class Doc(BaseModel):
+    """A vendor doc page to mine facts from. Every rule lives here; nothing about the vendor lives in code."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    url: str
+    text: str = ''              # dotted path to the body inside a JSON response; '' = the response itself
+    split: str = '、'
+    units: dict[str, int] = Field(default_factory=dict)
+    patterns: list[Pattern]
+
+
 class Cfg(BaseModel):
     """One model group from lm.yml."""
 
@@ -89,6 +125,7 @@ class Cfg(BaseModel):
     style: str|None = None
     keys: list[str]
     models: dict[str, dict[str, object]] = Field(default_factory=dict)
+    docs: list[Doc] = Field(default_factory=list)
 
 
 F = TypeVar('F', bound=BaseModel)
@@ -144,6 +181,127 @@ async def from_endpoint(sess: ClientSession, cfg: Cfg) -> dict[str, Facts]:
     return keyed((str(entry['id']), entry) for entry in body['data'])
 
 
+def flatten(node: Any, out: list[str]) -> list[str]:
+    """Every piece of text in a response body, including Quill-delta `insert` values."""
+    if isinstance(node, str):
+        out.append(node)
+    elif isinstance(node, dict):
+        if isinstance(node.get('insert'), str):
+            out.append(node['insert'])
+        else:
+            for value in node.values():
+                flatten(value, out)
+    elif isinstance(node, list):
+        for value in node:
+            flatten(value, out)
+    return out
+
+
+def page_text(body: Any, locator: str) -> str:
+    """One line for the whole page: walk `locator`, parse an embedded body, flatten."""
+    for step in locator.split('.') if locator else []:
+        body = body[step]
+    if isinstance(body, str):
+        try:
+            body = loads(body)
+        except ValueError:
+            return re.sub(r'\s+', ' ', body)
+    return re.sub(r'\s+', ' ', ''.join(flatten(body, [])))
+
+
+def nearest_listed(window: str, names: dict[str, str]) -> list[str]:
+    r"""The nearest listed name after a match: a `[\w.-]+` capture would bind the page's component ids.
+
+    Ties at one index break to the longest name, so `glm-5.3-flash` never resolves to `glm-5.3`.
+    """
+    low = window.lower()
+    hits = [(low.find(name), -len(name), name) for name in names if low.find(name) >= 0]
+    return [names[min(hits)[2]]] if hits else []
+
+
+def doc_facts(doc: Doc, page: str, names: dict[str, str]
+              ) -> tuple[dict[str, Facts], list[tuple[int, str, int, bool]], list[str]]:
+    """Mine one page: facts, per-rule `(order, field, matches, skipped)` counts, and complaints.
+
+    Only names the group lists are accepted. A bad rule is reported and skipped — it never discards what
+    the other rules already mined.
+    """
+    found: dict[str, dict[str, object]] = {}
+    counts: list[tuple[int, str, int, bool]] = []
+    complaints: list[str] = []
+    for order, rule in enumerate(doc.patterns, start=1):
+        where = f'#{order} ({rule.field})'
+        if rule.field not in Facts.model_fields:
+            complaints.append(f'{where} is not a facts field, rule skipped')
+            continue
+        if rule.field in DERIVED_ONLY:
+            complaints.append(f'{where} is derived by litellm, never prose-derived, rule skipped')
+            continue
+        try:
+            pattern = re.compile(rule.pattern)
+        except re.error as bad:
+            complaints.append(f'{where} is not a valid regex, rule skipped: {bad}')
+            continue
+        if 'value' not in pattern.groupindex and rule.field not in BOOL_FIELDS:
+            complaints.append(f'{where} captures no `value` and {rule.field} is not a flag, rule skipped')
+            continue
+        count = 0
+        undeclared: set[str] = set()
+        for match in pattern.finditer(page):
+            groups = match.groupdict()
+            captured = groups.get('models') or groups.get('model') or ''
+            here = [name.strip() for name in captured.split(doc.split) if name.strip()]
+            if not here and rule.bind == 'forward':
+                here = nearest_listed(page[match.end():match.end() + rule.window], names)
+            here = [name for name in here if name.lower() in names]
+            if not here:
+                continue
+            value = groups.get('value')
+            unit = (groups.get('unit') or '').lower()
+            if unit and unit not in doc.units:
+                undeclared.add(unit)      # an undeclared unit would silently scale the number by 1
+                continue
+            count += 1
+            for model in here:
+                facts = found.setdefault(names[model.lower()], {})
+                if value is None:
+                    facts[rule.field] = True          # the rule has no `value`, and the field is a flag
+                    continue
+                try:
+                    number = int(float(value) * doc.units.get(unit, 1))
+                except ValueError:
+                    continue          # a capture that is not a number yields nothing
+                previous = facts.get(rule.field)
+                if isinstance(previous, int):
+                    number = min(number, previous)     # never over-promise a window
+                facts[rule.field] = number
+        if undeclared:
+            complaints.append(f'{where} uses units not declared in `units`: {sorted(undeclared)}')
+        counts.append((order, rule.field, count, bool(undeclared)))
+    return {model: Facts.model_validate(facts) for model, facts in found.items()}, counts, complaints
+
+
+async def from_docs(sess: ClientSession, cfg: Cfg, names: dict[str, str]) -> dict[str, Facts]:
+    """Mine every doc the group declares; a bad rule, a dead rule or an unreachable page is reported."""
+    found: dict[str, Facts] = {}
+    for index, doc in enumerate(cfg.docs, start=1):
+        where = f'doc{index} {doc.url.split("?")[0]}'
+        try:
+            page = page_text(await get_json(sess, doc.url), doc.text)
+        except Exception as unread:      # a broken page must not take the group's other docs down
+            print(f'  !! {where} page or `text` locator failed: {unread!r}')
+            continue
+        facts, counts, found_complaints = doc_facts(doc, page, names)
+        print(f'  {where}: {len(facts)} models, hits {[count for _, _, count, _ in counts]}')
+        for complaint in found_complaints:
+            print(f'  !! {where} {complaint}')
+        dead = [f'#{order} {field}' for order, field, count, skipped in counts if not count and not skipped]
+        if dead:
+            print(f'  !! {where} nothing matched: {", ".join(dead)} — the page may have changed')
+        absorb(found, facts.items())
+    return found
+
+
 async def guard(name: str, source: str, fetch: Awaitable[dict[str, Facts]]) -> dict[str, Facts]:
     """Report a failing source loudly and carry on with the others, never silently."""
     try:
@@ -157,13 +315,15 @@ async def build(sess: ClientSession, name: str, cfg: Cfg,
                 cost_map: dict[str, dict[str, object]]) -> tuple[str, Cfg, dict[str, Facts]]:
     offline = from_backup(name, cost_map)
     catalog = await guard(name, 'catalog', from_catalog(sess, name))
-    listed = (await guard(name, 'endpoint', from_endpoint(sess, cfg))
+    probed = (await guard(name, 'endpoint', from_endpoint(sess, cfg))
               if not (offline or catalog) and cfg.openai and cfg.keys else {})
+    names = {model.lower(): model for model in cfg.models}
+    mined = await guard(name, 'docs', from_docs(sess, cfg, names))
     models: dict[str, Facts] = {}
-    for source in (offline, catalog, listed, keyed(cfg.models.items())):
+    for source in (offline, catalog, probed, mined, keyed(cfg.models.items())):
         absorb(models, source.items())
-    print(f'[{name}] backup={len(offline)} catalog={len(catalog)} endpoint={len(listed)} '
-          f'user={len(cfg.models)} -> {len(models)} models')
+    print(f'[{name}] backup={len(offline)} catalog={len(catalog)} endpoint={len(probed)} '
+          f'docs={len(mined)} user={len(cfg.models)} -> {len(models)} models')
     return name, cfg, models
 
 
