@@ -4,8 +4,14 @@
 Sources, lowest priority first:
   1. litellm's shipped model_prices_and_context_window_backup.json (offline baseline)
   2. https://api.litellm.ai/model_catalog (live, richer)
-  3. the provider's own /models endpoint (discovery only, when 1 and 2 know nothing)
-  4. ~/my/misc/lm.yml `models:` (user assertions, highest priority)
+  3. the provider's own /models endpoint (discovery only)
+  4. https://api.githubcopilot.com/models (github_copilot's account-scoped catalog)
+  5. vendor doc pages (`roster` names the page declares, `patterns` the facts it states)
+  6. ~/my/misc/lm.yml `models:` (extras and per-model assertions, highest priority)
+
+A provider's `roster:` decides which names are members; every other source only annotates a member.
+That keeps a vendor's platform-wide `/models` dump from shipping models a subscription cannot use.
+When `roster:` is absent, every source may introduce a model.
 
 Every source is normalized to `Facts` — one flat leaf per fact — before merging, so priority
 is decided per field and never per object. `None` means "no source had an opinion": it never
@@ -13,10 +19,12 @@ overwrites a value, and `exclude_none` keeps it out of the output.
 """
 
 from asyncio import gather, new_event_loop
+import os
 import re
 from collections.abc import Awaitable, Iterable
-from json import load, loads
+from json import dumps, load, loads
 from pathlib import Path
+from time import time
 from typing import Any, Literal, TypeVar, get_args
 
 from aiohttp import ClientSession, ClientTimeout
@@ -27,6 +35,13 @@ CATALOG_URL = 'https://api.litellm.ai/model_catalog'
 BACKUP_PATH = Path('/home/z/.venv/lib/python3.12/site-packages/litellm/model_prices_and_context_window_backup.json')
 CONFIG_PATH = Path('/home/z/my/misc/lm.yml')
 OUTPUT_PATH = Path('/home/z/litellm.yml')
+
+# github_copilot has no plain /models; litellm caches the GitHub->Copilot exchange here.
+COPILOT_DIR = Path(os.getenv('GITHUB_COPILOT_TOKEN_DIR', '~/.config/litellm/github_copilot')).expanduser()
+COPILOT_TOKEN_URL = 'https://api.github.com/copilot_internal/v2/token'
+COPILOT_API_BASE = 'https://api.githubcopilot.com'
+# Copilot's catalog speaks its own endpoint names; litellm's cost map spells them /v1/...
+ENDPOINT_ALIASES = {'/chat/completions': '/v1/chat/completions', '/responses': '/v1/responses'}
 
 # Per-token costs litellm reads; a 0.0 in these sources means "price unknown", not "free".
 COST_FIELDS = (
@@ -113,7 +128,15 @@ class Doc(BaseModel):
     text: str = ''              # dotted path to the body inside a JSON response; '' = the response itself
     split: str = '、'
     units: dict[str, int] = Field(default_factory=dict)
+    # A page that names its own models feeds the roster: `roster` regexes search the flattened page
+    # text, while `inline_code` regexes fullmatch the spans the page marked as literal ids. Both
+    # yield lowercase ids, the form a vendor's API accepts (`GLM-5.3` on the page, `glm-5.3` for us).
+    roster: list[str] = Field(default_factory=list)
+    inline_code: list[str] = Field(default_factory=list)
     patterns: list[Pattern]
+
+
+Channel = Literal['backup', 'catalog', 'endpoint', 'copilot', 'docs']
 
 
 class Cfg(BaseModel):
@@ -123,8 +146,9 @@ class Cfg(BaseModel):
 
     openai: str|None = None
     style: str|None = None
-    keys: list[str]
-    models: dict[str, dict[str, object]] = Field(default_factory=dict)
+    keys: list[str] = Field(default_factory=list)
+    roster: list[Channel]|None = None     # who decides membership; None = any source may add a model
+    models: dict[str, dict[str, object]] = Field(default_factory=dict)   # extras + assertions
     docs: list[Doc] = Field(default_factory=list)
 
 
@@ -181,6 +205,68 @@ async def from_endpoint(sess: ClientSession, cfg: Cfg) -> dict[str, Facts]:
     return keyed((str(entry['id']), entry) for entry in body['data'])
 
 
+async def copilot_token(sess: ClientSession) -> tuple[str, str]:
+    """The cached Copilot bearer and API base; refreshed from the cached GitHub token when stale.
+
+    litellm performs the GitHub -> Copilot exchange at runtime and caches it, so reusing that cache
+    keeps this generator from needing a github_copilot key of its own.
+    """
+    cached: dict[str, Any] = loads((COPILOT_DIR / 'api-key.json').read_text())
+    if not cached.get('expires_at', 0) > time():
+        access = (COPILOT_DIR / 'access-token').read_text().strip()
+        cached = await get_json(sess, COPILOT_TOKEN_URL,
+                                {'authorization': f'token {access}', 'accept': 'application/json'})
+        (COPILOT_DIR / 'api-key.json').write_text(dumps(cached))
+    endpoints = cached.get('endpoints') or {}
+    return str(cached['token']), str(endpoints.get('api') or COPILOT_API_BASE)
+
+
+def copilot_facts(entry: dict[str, Any]) -> Facts:
+    """One `api.githubcopilot.com/models` entry -> flat facts. An account-scoped catalog, so it wins."""
+    def flag(value: Any) -> bool|None:
+        """A capability is an opinion only when the catalog states it; absent stays unknown."""
+        return None if value is None else bool(value)
+
+    capabilities = entry.get('capabilities') or {}
+    limits = capabilities.get('limits') or {}
+    supports = capabilities.get('supports') or {}
+    endpoints = [ENDPOINT_ALIASES.get(endpoint, endpoint)
+                 for endpoint in entry.get('supported_endpoints') or []
+                 if isinstance(endpoint, str) and endpoint.startswith('/')]
+    responses_only = any('responses' in endpoint for endpoint in endpoints) \
+        and not any('chat' in endpoint for endpoint in endpoints)
+    kind = capabilities.get('type')
+    return Facts(
+        mode=('embedding' if kind == 'embeddings' else
+              'completion' if kind == 'completion' else
+              'responses' if responses_only else 'chat'),
+        max_input_tokens=limits.get('max_prompt_tokens') or limits.get('max_context_window_tokens'),
+        max_output_tokens=limits.get('max_output_tokens'),
+        supports_vision=flag(supports.get('vision')),
+        supports_function_calling=flag(supports.get('tool_calls')),
+        supports_parallel_function_calling=flag(supports.get('parallel_tool_calls')),
+        supports_native_streaming=flag(supports.get('streaming')),
+        supports_response_schema=flag(supports.get('structured_outputs')),
+        supports_reasoning=flag(supports.get('reasoning_effort')),
+        supported_endpoints=endpoints or None,
+    )
+
+
+async def from_copilot(sess: ClientSession) -> dict[str, Facts]:
+    """github_copilot has no plain /models: read the account's own catalog through the token exchange."""
+    token, api_base = await copilot_token(sess)
+    body = await get_json(sess, f'{api_base}/models', {
+        'Authorization': f'Bearer {token}',
+        'copilot-integration-id': 'vscode-chat',
+        'editor-version': 'vscode/1.95.0',
+        'editor-plugin-version': 'copilot-chat/0.26.7',
+        'user-agent': 'GitHubCopilotChat/0.26.7',
+        'openai-intent': 'conversation-panel',
+        'x-github-api-version': '2025-04-01',
+    })
+    return absorb({}, ((str(entry['id']), copilot_facts(entry)) for entry in body['data']))
+
+
 def flatten(node: Any, out: list[str]) -> list[str]:
     """Every piece of text in a response body, including Quill-delta `insert` values."""
     if isinstance(node, str):
@@ -197,16 +283,44 @@ def flatten(node: Any, out: list[str]) -> list[str]:
     return out
 
 
-def page_text(body: Any, locator: str) -> str:
-    """One line for the whole page: walk `locator`, parse an embedded body, flatten."""
+def page_node(body: Any, locator: str) -> Any:
+    """Walk `locator` and parse the embedded body once, leaving a plain string as-is."""
     for step in locator.split('.') if locator else []:
         body = body[step]
     if isinstance(body, str):
         try:
-            body = loads(body)
+            return loads(body)
         except ValueError:
-            return re.sub(r'\s+', ' ', body)
-    return re.sub(r'\s+', ' ', ''.join(flatten(body, [])))
+            return body
+    return body
+
+
+def page_text(body: Any, locator: str) -> str:
+    """One line for the whole page: walk `locator`, parse an embedded body, flatten."""
+    parsed = page_node(body, locator)
+    return re.sub(r'\s+', ' ', parsed if isinstance(parsed, str) else ''.join(flatten(parsed, [])))
+
+
+def inline_code(body: Any, locator: str) -> list[str]:
+    """Every span the page marked as literal code, in order — a vendor's own spelling of its ids."""
+    spans: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            insert = node.get('insert')
+            if isinstance(insert, str):
+                attributes = node.get('attributes')
+                if isinstance(attributes, dict) and attributes.get('inlineCode'):
+                    spans.append(insert)
+            else:
+                for value in node.values():
+                    walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(page_node(body, locator))
+    return spans
 
 
 def nearest_listed(window: str, names: dict[str, str]) -> list[str]:
@@ -281,16 +395,33 @@ def doc_facts(doc: Doc, page: str, names: dict[str, str]
     return {model: Facts.model_validate(facts) for model, facts in found.items()}, counts, complaints
 
 
-async def from_docs(sess: ClientSession, cfg: Cfg, names: dict[str, str]) -> dict[str, Facts]:
-    """Mine every doc the group declares; a bad rule, a dead rule or an unreachable page is reported."""
-    found: dict[str, Facts] = {}
+def doc_roster(doc: Doc, page: str, spans: list[str]) -> list[str]:
+    """The names one page declares for itself: `roster` regexes over the text, `inline_code` over spans."""
+    named = [match.group('name') for rule in doc.roster for match in re.finditer(rule, page)]
+    coded = [span for rule in doc.inline_code for span in spans if re.fullmatch(rule, span)]
+    return [name.lower() for name in (*named, *coded)]
+
+
+async def from_docs(sess: ClientSession, cfg: Cfg,
+                    known: Iterable[str]) -> tuple[dict[str, Facts], list[str]]:
+    """Mine every doc the group declares: the facts, and the roster the pages name for themselves.
+
+    Pages are fetched once so that a roster in any one page can name models for the rules in every
+    page. A broken page or a bad rule is reported and never takes the group's other docs down.
+    """
+    fetched: list[tuple[int, Doc, str, list[str]]] = []
     for index, doc in enumerate(cfg.docs, start=1):
         where = f'doc{index} {doc.url.split("?")[0]}'
         try:
-            page = page_text(await get_json(sess, doc.url), doc.text)
+            body = await get_json(sess, doc.url)
+            fetched.append((index, doc, page_text(body, doc.text), inline_code(body, doc.text)))
         except Exception as unread:      # a broken page must not take the group's other docs down
             print(f'  !! {where} page or `text` locator failed: {unread!r}')
-            continue
+    roster = [name for _, doc, page, spans in fetched for name in doc_roster(doc, page, spans)]
+    names = {name.lower(): name for name in (*known, *roster)}
+    found: dict[str, Facts] = {}
+    for index, doc, page, _ in fetched:
+        where = f'doc{index} {doc.url.split("?")[0]}'
         facts, counts, found_complaints = doc_facts(doc, page, names)
         print(f'  {where}: {len(facts)} models, hits {[count for _, _, count, _ in counts]}')
         for complaint in found_complaints:
@@ -299,7 +430,7 @@ async def from_docs(sess: ClientSession, cfg: Cfg, names: dict[str, str]) -> dic
         if dead:
             print(f'  !! {where} nothing matched: {", ".join(dead)} — the page may have changed')
         absorb(found, facts.items())
-    return found
+    return found, roster
 
 
 async def guard(name: str, source: str, fetch: Awaitable[dict[str, Facts]]) -> dict[str, Facts]:
@@ -313,17 +444,45 @@ async def guard(name: str, source: str, fetch: Awaitable[dict[str, Facts]]) -> d
 
 async def build(sess: ClientSession, name: str, cfg: Cfg,
                 cost_map: dict[str, dict[str, object]]) -> tuple[str, Cfg, dict[str, Facts]]:
-    offline = from_backup(name, cost_map)
-    catalog = await guard(name, 'catalog', from_catalog(sess, name))
-    probed = (await guard(name, 'endpoint', from_endpoint(sess, cfg))
-              if not (offline or catalog) and cfg.openai and cfg.keys else {})
-    names = {model.lower(): model for model in cfg.models}
-    mined = await guard(name, 'docs', from_docs(sess, cfg, names))
+    """Gather every source, then keep only the names the group's `roster:` admits (all, when unset)."""
+    roster = cfg.roster or ['backup', 'catalog', 'endpoint']
+    channels: dict[str, dict[str, Facts]] = {'backup': from_backup(name, cost_map)}
+    channels['catalog'] = await guard(name, 'catalog', from_catalog(sess, name))
+    channels['endpoint'] = (
+        await guard(name, 'endpoint', from_endpoint(sess, cfg))
+        if ('endpoint' in (cfg.roster or []) or not (channels['backup'] or channels['catalog']))
+        and cfg.openai and cfg.keys else {})
+    channels['copilot'] = (await guard(name, 'copilot', from_copilot(sess))
+                           if 'copilot' in roster else {})
+    extras = list(cfg.models)
+    known = [*extras, *(model for channel in roster if channel != 'docs' for model in channels[channel])]
+    mined: dict[str, Facts] = {}
+    named: list[str] = []
+    if cfg.docs:
+        try:
+            mined, named = await from_docs(sess, cfg, known)
+        except Exception as error:       # a dead doc source must not take the group down
+            print(f'!! [{name}] docs source unavailable: {type(error).__name__}: {error}')
+    if cfg.roster is None:               # no roster declared: any source may introduce a model
+        members = [model for source in (*channels.values(), mined) for model in source] + named
+    else:
+        members = [model for channel in roster if channel != 'docs' for model in channels[channel]]
+        members += named if 'docs' in roster else []
+    spelling: dict[str, str] = {}        # lowercase -> the spelling that reaches the output
+    for model in (*members, *extras):
+        spelling.setdefault(model.lower(), model)
     models: dict[str, Facts] = {}
-    for source in (offline, catalog, probed, mined, keyed(cfg.models.items())):
-        absorb(models, source.items())
-    print(f'[{name}] backup={len(offline)} catalog={len(catalog)} endpoint={len(probed)} '
-          f'docs={len(mined)} user={len(cfg.models)} -> {len(models)} models')
+    for source in (channels['backup'], channels['catalog'], channels['endpoint'], channels['copilot'],
+                   mined, keyed(cfg.models.items())):
+        for model, found in source.items():
+            if model.lower() in spelling:
+                key = spelling[model.lower()]
+                models[key] = merge(found, models[key]) if key in models else found
+    for key in spelling.values():        # a roster name no source states facts for is still a member
+        models.setdefault(key, Facts())
+    counts = ' '.join(f'{channel}={len(found)}' for channel, found in channels.items())
+    print(f'[{name}] roster="{" ".join(roster)}" {counts} docs={len(mined)} extra={len(extras)} '
+          f'-> {len(models)} models')
     return name, cfg, models
 
 
