@@ -1,21 +1,17 @@
 #!/bin/env python3
 """Generate ~/litellm.yml from provider facts gathered from several sources.
 
-Sources, lowest priority first:
-  1. litellm's shipped model_prices_and_context_window_backup.json (offline baseline)
-  2. https://api.litellm.ai/model_catalog (live, richer)
-  3. the provider's own /models endpoint (discovery only)
-  4. https://api.githubcopilot.com/models (github_copilot's account-scoped catalog)
-  5. vendor doc pages (`roster` names the page declares, `patterns` the facts it states)
-  6. ~/my/misc/lm.yml `models:` (extras and per-model assertions, highest priority)
+Lowest priority first: litellm's shipped model_prices_and_context_window_backup.json, the live
+https://api.litellm.ai/model_catalog, the provider's own /models endpoint, the account-scoped
+https://api.githubcopilot.com/models, vendor doc pages (`roster` names the page declares, `patterns`
+the facts it states), and ~/my/misc/lm.yml `models:` (extras and assertions).
 
-A provider's `roster:` decides which names are members; every other source only annotates a member.
-That keeps a vendor's platform-wide `/models` dump from shipping models a subscription cannot use.
-When `roster:` is absent, every source may introduce a model.
-
-Every source is normalized to `Facts` — one flat leaf per fact — before merging, so priority
-is decided per field and never per object. `None` means "no source had an opinion": it never
-overwrites a value, and `exclude_none` keeps it out of the output.
+A provider's `roster:` decides which names are members; every other source only annotates a member,
+so a platform-wide `/models` dump cannot ship models a subscription cannot use; with no `roster:`,
+any source may introduce one. Every source is normalized to `Facts` — one flat leaf per fact — so
+priority is decided per field and never per object. `None` means "no source had an opinion": it
+never overwrites a value, and `exclude_none` keeps it out of the output. Each model is exported once
+per key, as `<group>/<model>`.
 """
 
 from asyncio import gather, new_event_loop
@@ -44,14 +40,9 @@ COPILOT_API_BASE = 'https://api.githubcopilot.com'
 ENDPOINT_ALIASES = {'/chat/completions': '/v1/chat/completions', '/responses': '/v1/responses'}
 
 # Per-token costs litellm reads; a 0.0 in these sources means "price unknown", not "free".
-COST_FIELDS = (
-    'input_cost_per_token',
-    'output_cost_per_token',
-    'input_cost_per_audio_token',
-    'output_cost_per_reasoning_token',
-    'cache_read_input_token_cost',
-    'cache_creation_input_token_cost',
-)
+COST_FIELDS = ('input_cost_per_token', 'output_cost_per_token', 'input_cost_per_audio_token',
+               'output_cost_per_reasoning_token', 'cache_read_input_token_cost',
+               'cache_creation_input_token_cost')
 
 
 class Facts(BaseModel):
@@ -96,8 +87,8 @@ class Facts(BaseModel):
     supported_endpoints: list[str]|None = None
 
 
-# litellm rewrites a caller's `max_tokens` from this legacy cost-map field (token_counter.py), so it is
-# never prose-derived: a misread page must not be able to silently cap a request.
+# litellm rewrites a caller's `max_tokens` from this legacy cost-map field (token_counter.py), so it
+# is never prose-derived: a misread page must not be able to silently cap a request.
 DERIVED_ONLY = ('max_tokens',)
 
 # Flag fields take `True` from a rule with no `value` capture; every other field must capture a number.
@@ -105,22 +96,21 @@ BOOL_FIELDS = frozenset(name for name, field in Facts.model_fields.items() if bo
 
 
 class Pattern(BaseModel):
-    """One extraction rule: `field` gets the captured `value` (or True) for the names the rule captures.
+    """One extraction rule: `field` gets the captured `value` (or True, for a flag) for its names.
 
-    Strict, like `Doc`: a misspelled key is a config error rather than a silently ignored one, since a
-    dropped `bind` would look exactly like a dead pattern.
+    Strict, like `Doc`: a misspelled key is a config error, not a silently ignored one.
     """
 
     model_config = ConfigDict(extra='forbid')
 
     field: str
     pattern: str
-    bind: Literal['forward']|None = None    # bind to the nearest name the group lists when nothing is captured
+    bind: Literal['forward']|None = None    # bind to the nearest listed name when nothing is captured
     window: int = 400
 
 
 class Doc(BaseModel):
-    """A vendor doc page to mine facts from. Every rule lives here; nothing about the vendor lives in code."""
+    """A vendor doc page to mine. Every rule lives here; nothing about the vendor lives in code."""
 
     model_config = ConfigDict(extra='forbid')
 
@@ -129,8 +119,8 @@ class Doc(BaseModel):
     split: str = '、'
     units: dict[str, int] = Field(default_factory=dict)
     # A page that names its own models feeds the roster: `roster` regexes search the flattened page
-    # text, while `inline_code` regexes fullmatch the spans the page marked as literal ids. Both
-    # yield lowercase ids, the form a vendor's API accepts (`GLM-5.3` on the page, `glm-5.3` for us).
+    # text, while `inline_code` regexes fullmatch the spans the page marked as literal ids. Both yield
+    # lowercase ids, the form a vendor's API accepts (`GLM-5.3` on the page, `glm-5.3` for us).
     roster: list[str] = Field(default_factory=list)
     inline_code: list[str] = Field(default_factory=list)
     patterns: list[Pattern]
@@ -146,7 +136,7 @@ class Cfg(BaseModel):
 
     openai: str|None = None
     style: str|None = None
-    keys: list[str] = Field(default_factory=list)
+    keys: dict[str, str] = Field(default_factory=dict)
     roster: list[Channel]|None = None     # who decides membership; None = any source may add a model
     models: dict[str, dict[str, object]] = Field(default_factory=dict)   # extras + assertions
     docs: list[Doc] = Field(default_factory=list)
@@ -159,8 +149,7 @@ def merge(primary: F, fallback: F) -> F:
     """Field-wise priority merge: `primary` wins where it has an opinion, `fallback` fills the rest."""
     values = {name: getattr(primary, name) for name in type(primary).model_fields}
     return type(primary)(**{
-        name: value if value is not None else getattr(fallback, name)
-        for name, value in values.items()
+        name: value if value is not None else getattr(fallback, name) for name, value in values.items()
     })
 
 
@@ -171,14 +160,13 @@ def absorb(target: dict[str, F], source: Iterable[tuple[str, F]]) -> dict[str, F
     return target
 
 
-def facts(raw: dict[str, object]) -> Facts:
-    """Normalize one source entry to flat facts."""
-    parsed = Facts.model_validate(raw)
-    return parsed.model_copy(update={name: None for name in COST_FIELDS if getattr(parsed, name) == 0.0})
-
-
 def keyed(entries: Iterable[tuple[str, dict[str, object]]]) -> dict[str, Facts]:
-    """`<model> -> Facts`; entries collapsing onto one model name are merged, never last-wins."""
+    """One source's `<model> -> Facts`, normalizing cost fields and merging same-name entries."""
+    def facts(raw: dict[str, object]) -> Facts:
+        """0.0 in a cost field means "price unknown", not "free"."""
+        parsed = Facts.model_validate(raw)
+        return parsed.model_copy(update={name: None for name in COST_FIELDS if getattr(parsed, name) == 0.0})
+
     return absorb({}, ((model, facts(entry)) for model, entry in entries))
 
 
@@ -186,6 +174,15 @@ async def get_json(sess: ClientSession, url: str, headers: dict[str, str] | None
     response = await sess.get(url, headers=headers, timeout=ClientTimeout(30))
     response.raise_for_status()
     return await response.json()
+
+
+async def guard(name: str, source: str, fetch: Awaitable[dict[str, Facts]]) -> dict[str, Facts]:
+    """Report a failing source loudly and carry on with the others, never silently."""
+    try:
+        return await fetch
+    except Exception as error:
+        print(f'!! [{name}] {source} source unavailable: {type(error).__name__}: {error}')
+        return {}
 
 
 def from_backup(provider: str, cost_map: dict[str, dict[str, object]]) -> dict[str, Facts]:
@@ -201,12 +198,13 @@ async def from_catalog(sess: ClientSession, provider: str) -> dict[str, Facts]:
 
 async def from_endpoint(sess: ClientSession, cfg: Cfg) -> dict[str, Facts]:
     """The provider's own /models list: ids only, so the facts stay unset."""
-    body = await get_json(sess, f'{cfg.openai}/models', {'Authorization': f'Bearer {cfg.keys[0]}'})
+    auth = {'Authorization': f'Bearer {next(iter(cfg.keys.values()))}'}
+    body = await get_json(sess, f'{cfg.openai}/models', auth)
     return keyed((str(entry['id']), entry) for entry in body['data'])
 
 
 async def copilot_token(sess: ClientSession) -> tuple[str, str]:
-    """The cached Copilot bearer and API base; refreshed from the cached GitHub token when stale.
+    """The cached Copilot bearer and API base, refreshed from the cached GitHub access token if stale.
 
     litellm performs the GitHub -> Copilot exchange at runtime and caches it, so reusing that cache
     keeps this generator from needing a github_copilot key of its own.
@@ -233,8 +231,7 @@ def copilot_facts(entry: dict[str, Any]) -> Facts:
     endpoints = [ENDPOINT_ALIASES.get(endpoint, endpoint)
                  for endpoint in entry.get('supported_endpoints') or []
                  if isinstance(endpoint, str) and endpoint.startswith('/')]
-    responses_only = any('responses' in endpoint for endpoint in endpoints) \
-        and not any('chat' in endpoint for endpoint in endpoints)
+    responses_only = any('responses' in e for e in endpoints) and not any('chat' in e for e in endpoints)
     kind = capabilities.get('type')
     return Facts(
         mode=('embedding' if kind == 'embeddings' else
@@ -267,64 +264,44 @@ async def from_copilot(sess: ClientSession) -> dict[str, Facts]:
     return absorb({}, ((str(entry['id']), copilot_facts(entry)) for entry in body['data']))
 
 
-def flatten(node: Any, out: list[str]) -> list[str]:
-    """Every piece of text in a response body, including Quill-delta `insert` values."""
+def walk(node: Any, text: list[str], spans: list[str]) -> None:
+    """Collect a response body's text, including Quill-delta `insert` values and inline-code spans."""
     if isinstance(node, str):
-        out.append(node)
+        text.append(node)
     elif isinstance(node, dict):
-        if isinstance(node.get('insert'), str):
-            out.append(node['insert'])
+        insert = node.get('insert')
+        if isinstance(insert, str):
+            if (node.get('attributes') or {}).get('inlineCode'):
+                spans.append(insert)
+            text.append(insert)
         else:
             for value in node.values():
-                flatten(value, out)
+                walk(value, text, spans)
     elif isinstance(node, list):
         for value in node:
-            flatten(value, out)
-    return out
+            walk(value, text, spans)
 
 
-def page_node(body: Any, locator: str) -> Any:
-    """Walk `locator` and parse the embedded body once, leaving a plain string as-is."""
+def page_parts(body: Any, locator: str) -> tuple[str, list[str]]:
+    """One flat line of the whole page, and the spans it marked as literal code, in order.
+
+    `locator` walks into the body first, parsing an embedded JSON string once.
+    """
     for step in locator.split('.') if locator else []:
         body = body[step]
     if isinstance(body, str):
         try:
-            return loads(body)
+            body = loads(body)
         except ValueError:
-            return body
-    return body
-
-
-def page_text(body: Any, locator: str) -> str:
-    """One line for the whole page: walk `locator`, parse an embedded body, flatten."""
-    parsed = page_node(body, locator)
-    return re.sub(r'\s+', ' ', parsed if isinstance(parsed, str) else ''.join(flatten(parsed, [])))
-
-
-def inline_code(body: Any, locator: str) -> list[str]:
-    """Every span the page marked as literal code, in order — a vendor's own spelling of its ids."""
+            pass
+    text: list[str] = []
     spans: list[str] = []
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            insert = node.get('insert')
-            if isinstance(insert, str):
-                attributes = node.get('attributes')
-                if isinstance(attributes, dict) and attributes.get('inlineCode'):
-                    spans.append(insert)
-            else:
-                for value in node.values():
-                    walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                walk(value)
-
-    walk(page_node(body, locator))
-    return spans
+    walk(body, text, spans)
+    return re.sub(r'\s+', ' ', ''.join(text)), spans
 
 
 def nearest_listed(window: str, names: dict[str, str]) -> list[str]:
-    r"""The nearest listed name after a match: a `[\w.-]+` capture would bind the page's component ids.
+    r"""The nearest listed name after a match: a `[\w.-]+` capture would bind the page's own ids.
 
     Ties at one index break to the longest name, so `glm-5.3-flash` never resolves to `glm-5.3`.
     """
@@ -333,45 +310,40 @@ def nearest_listed(window: str, names: dict[str, str]) -> list[str]:
     return [names[min(hits)[2]]] if hits else []
 
 
-def doc_facts(doc: Doc, page: str, names: dict[str, str]
-              ) -> tuple[dict[str, Facts], list[tuple[int, str, int, bool]], list[str]]:
-    """Mine one page: facts, per-rule `(order, field, matches, skipped)` counts, and complaints.
+def doc_facts(doc: Doc, page: str, names: dict[str, str], where: str) -> dict[str, Facts]:
+    """Mine one page for the names the group lists, printing what matched.
 
-    Only names the group lists are accepted. A bad rule is reported and skipped — it never discards what
-    the other rules already mined.
+    Only listed names are accepted; a bad rule is reported and skipped, never discarding what the
+    other rules already mined.
     """
     found: dict[str, dict[str, object]] = {}
     counts: list[tuple[int, str, int, bool]] = []
     complaints: list[str] = []
     for order, rule in enumerate(doc.patterns, start=1):
-        where = f'#{order} ({rule.field})'
-        if rule.field not in Facts.model_fields:
-            complaints.append(f'{where} is not a facts field, rule skipped')
-            continue
-        if rule.field in DERIVED_ONLY:
-            complaints.append(f'{where} is derived by litellm, never prose-derived, rule skipped')
+        spot = f'#{order} ({rule.field})'
+        if rule.field not in Facts.model_fields or rule.field in DERIVED_ONLY:
+            complaints.append(f'{spot} is not a prose-minable facts field, rule skipped')
             continue
         try:
             pattern = re.compile(rule.pattern)
         except re.error as bad:
-            complaints.append(f'{where} is not a valid regex, rule skipped: {bad}')
+            complaints.append(f'{spot} is not a valid regex, rule skipped: {bad}')
             continue
         if 'value' not in pattern.groupindex and rule.field not in BOOL_FIELDS:
-            complaints.append(f'{where} captures no `value` and {rule.field} is not a flag, rule skipped')
+            complaints.append(f'{spot} captures no `value` and {rule.field} is not a flag, rule skipped')
             continue
         count = 0
         undeclared: set[str] = set()
         for match in pattern.finditer(page):
             groups = match.groupdict()
-            captured = groups.get('models') or groups.get('model') or ''
-            here = [name.strip() for name in captured.split(doc.split) if name.strip()]
-            if not here and rule.bind == 'forward':
-                here = nearest_listed(page[match.end():match.end() + rule.window], names)
+            listed = (groups.get('models') or groups.get('model') or '').split(doc.split)
+            here = [name.strip() for name in listed if name.strip()] or (
+                nearest_listed(page[match.end():match.end() + rule.window], names)
+                if rule.bind == 'forward' else [])
             here = [name for name in here if name.lower() in names]
             if not here:
                 continue
-            value = groups.get('value')
-            unit = (groups.get('unit') or '').lower()
+            value, unit = groups.get('value'), (groups.get('unit') or '').lower()
             if unit and unit not in doc.units:
                 undeclared.add(unit)      # an undeclared unit would silently scale the number by 1
                 continue
@@ -390,9 +362,15 @@ def doc_facts(doc: Doc, page: str, names: dict[str, str]
                     number = min(number, previous)     # never over-promise a window
                 facts[rule.field] = number
         if undeclared:
-            complaints.append(f'{where} uses units not declared in `units`: {sorted(undeclared)}')
+            complaints.append(f'{spot} uses units not declared in `units`: {sorted(undeclared)}')
         counts.append((order, rule.field, count, bool(undeclared)))
-    return {model: Facts.model_validate(facts) for model, facts in found.items()}, counts, complaints
+    print(f'  {where}: {len(found)} models, hits {[count for _, _, count, _ in counts]}')
+    for complaint in complaints:
+        print(f'  !! {where} {complaint}')
+    dead = [f'#{order} {field}' for order, field, count, skipped in counts if not count and not skipped]
+    if dead:
+        print(f'  !! {where} nothing matched: {", ".join(dead)} — the page may have changed')
+    return {model: Facts.model_validate(raw) for model, raw in found.items()}
 
 
 def doc_roster(doc: Doc, page: str, spans: list[str]) -> list[str]:
@@ -402,44 +380,26 @@ def doc_roster(doc: Doc, page: str, spans: list[str]) -> list[str]:
     return [name.lower() for name in (*named, *coded)]
 
 
-async def from_docs(sess: ClientSession, cfg: Cfg,
-                    known: Iterable[str]) -> tuple[dict[str, Facts], list[str]]:
+async def from_docs(sess: ClientSession,
+                    cfg: Cfg, known: Iterable[str]) -> tuple[dict[str, Facts], list[str]]:
     """Mine every doc the group declares: the facts, and the roster the pages name for themselves.
 
     Pages are fetched once so that a roster in any one page can name models for the rules in every
     page. A broken page or a bad rule is reported and never takes the group's other docs down.
     """
-    fetched: list[tuple[int, Doc, str, list[str]]] = []
+    pages: list[tuple[int, Doc, str, list[str]]] = []
     for index, doc in enumerate(cfg.docs, start=1):
-        where = f'doc{index} {doc.url.split("?")[0]}'
         try:
-            body = await get_json(sess, doc.url)
-            fetched.append((index, doc, page_text(body, doc.text), inline_code(body, doc.text)))
+            page, spans = page_parts(await get_json(sess, doc.url), doc.text)
+            pages.append((index, doc, page, spans))
         except Exception as unread:      # a broken page must not take the group's other docs down
-            print(f'  !! {where} page or `text` locator failed: {unread!r}')
-    roster = [name for _, doc, page, spans in fetched for name in doc_roster(doc, page, spans)]
+            print(f'  !! doc{index} {doc.url.split("?")[0]} page or `text` locator failed: {unread!r}')
+    roster = [name for _, doc, page, spans in pages for name in doc_roster(doc, page, spans)]
     names = {name.lower(): name for name in (*known, *roster)}
     found: dict[str, Facts] = {}
-    for index, doc, page, _ in fetched:
-        where = f'doc{index} {doc.url.split("?")[0]}'
-        facts, counts, found_complaints = doc_facts(doc, page, names)
-        print(f'  {where}: {len(facts)} models, hits {[count for _, _, count, _ in counts]}')
-        for complaint in found_complaints:
-            print(f'  !! {where} {complaint}')
-        dead = [f'#{order} {field}' for order, field, count, skipped in counts if not count and not skipped]
-        if dead:
-            print(f'  !! {where} nothing matched: {", ".join(dead)} — the page may have changed')
-        absorb(found, facts.items())
+    for index, doc, page, _ in pages:
+        absorb(found, doc_facts(doc, page, names, f'doc{index} {doc.url.split("?")[0]}').items())
     return found, roster
-
-
-async def guard(name: str, source: str, fetch: Awaitable[dict[str, Facts]]) -> dict[str, Facts]:
-    """Report a failing source loudly and carry on with the others, never silently."""
-    try:
-        return await fetch
-    except Exception as error:
-        print(f'!! [{name}] {source} source unavailable: {type(error).__name__}: {error}')
-        return {}
 
 
 async def build(sess: ClientSession, name: str, cfg: Cfg,
@@ -448,7 +408,7 @@ async def build(sess: ClientSession, name: str, cfg: Cfg,
     roster = cfg.roster or ['backup', 'catalog', 'endpoint']
     channels: dict[str, dict[str, Facts]] = {'backup': from_backup(name, cost_map)}
     channels['catalog'] = await guard(name, 'catalog', from_catalog(sess, name))
-    channels['endpoint'] = (
+    channels['endpoint'] = (          # `cfg.roster`, not `roster`: the default never asks for /models
         await guard(name, 'endpoint', from_endpoint(sess, cfg))
         if ('endpoint' in (cfg.roster or []) or not (channels['backup'] or channels['catalog']))
         and cfg.openai and cfg.keys else {})
@@ -471,9 +431,9 @@ async def build(sess: ClientSession, name: str, cfg: Cfg,
     spelling: dict[str, str] = {}        # lowercase -> the spelling that reaches the output
     for model in (*members, *extras):
         spelling.setdefault(model.lower(), model)
+
     models: dict[str, Facts] = {}
-    for source in (channels['backup'], channels['catalog'], channels['endpoint'], channels['copilot'],
-                   mined, keyed(cfg.models.items())):
+    for source in (*channels.values(), mined, keyed(cfg.models.items())):
         for model, found in source.items():
             if model.lower() in spelling:
                 key = spelling[model.lower()]
@@ -487,21 +447,20 @@ async def build(sess: ClientSession, name: str, cfg: Cfg,
 
 
 def entries(name: str, cfg: Cfg, models: dict[str, Facts]) -> list[dict[str, object]]:
-    backend = cfg.style or name
+    """One router entry per model and key, exported as `<group>/<model>` and nothing else."""
     return [
         {
-            'model_name': alias,
+            'model_name': f'{name}/{model}',
             'litellm_params': {
                 'api_base': cfg.openai,
                 'api_key': key,
                 'drop_params': True,
-                'model': f'{backend}/{model}',
+                'model': f'{cfg.style or name}/{model}',
             },
             'model_info': found.model_dump(exclude_none=True),
         }
         for model, found in models.items()
-        for key in cfg.keys or [None]
-        for alias in (name, f'{name}/{model}')
+        for key in cfg.keys.values() or [None]
     ]
 
 
@@ -524,4 +483,5 @@ async def main() -> None:
     print(f'wrote {OUTPUT_PATH} with {len(model_list)} entries')
 
 
-new_event_loop().run_until_complete(main())
+if __name__ == '__main__':
+    new_event_loop().run_until_complete(main())

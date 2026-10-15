@@ -11,6 +11,10 @@ Facts are gathered from every source, lowest priority first: LiteLLM's shipped b
 
 Which *names* reach the output is separate. A provider's `roster:` names the channels that decide membership (for example `[docs]` for a coding-plan provider whose `/models` lists the whole platform, or `[copilot]` for GitHub Copilot), and every other source only annotates a member. When `roster:` is omitted, any source may introduce a model, preserving the permissive default. A doc page contributes to a `docs` roster through `roster:`/`inline_code:` name rules, and `models:` remains an optional place for extra names and per-model assertions.
 
+## Output
+
+Every model is exported under exactly one alias, `<group>/<model>`, once per key declared in that group; a group's bare name is not an alias.
+
 ## Requirements
 
 Python 3.12+ and the packages `aiohttp`, `pydantic`, and `PyYAML`.
