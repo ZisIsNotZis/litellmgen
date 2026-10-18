@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from yaml import safe_dump, safe_load
 
 CATALOG_URL = 'https://api.litellm.ai/model_catalog'
-BACKUP_PATH = Path('/home/z/.venv/lib/python3.12/site-packages/litellm/model_prices_and_context_window_backup.json')
+BACKUP_PATH = Path('/home/z/.venv/lib/python3.14/site-packages/litellm/model_prices_and_context_window_backup.json')
 CONFIG_PATH = Path('/home/z/my/misc/lm.yml')
 OUTPUT_PATH = Path('/home/z/litellm.yml')
 
