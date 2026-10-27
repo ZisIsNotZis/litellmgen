@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="litellmgen logo" width="132">
+  <a href="README.md"><strong>English</strong></a> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
-  <a href="README.md"><strong>English</strong></a> · <a href="README.zh-CN.md">简体中文</a>
+  <img src="assets/logo.svg" alt="litellmgen logo" width="132">
 </p>
 
 <h1 align="center">litellmgen</h1>
@@ -24,13 +24,13 @@ cd litellmgen
 python3 -m pip install aiohttp pydantic PyYAML
 ```
 
-Open `litellmgen.py` and set `BACKUP_PATH`, `CONFIG_PATH`, and `OUTPUT_PATH` near the top to paths on your machine. `BACKUP_PATH` should point at the `model_prices_and_context_window_backup.json` shipped with your installed LiteLLM. Then run:
+Open `litellmgen.py` and set `BACKUP_PATH`, `CONFIG_PATH`, and `OUTPUT_PATH` near the top to paths on your machine. `BACKUP_PATH` should point at the `model_prices_and_context_window_backup.json` shipped with your installed LiteLLM, and `CONFIG_PATH` at your own `lm.yml` (see [the shape below](#configuration-shape)). Then run:
 
 ```bash
 python3 litellmgen.py
 ```
 
-The generated router config is written to `OUTPUT_PATH` (default `~/litellm.yml`). If no models are produced, the script exits instead of writing an empty `model_list`.
+The generated router config is written to `OUTPUT_PATH`; the repository ships the author's own machine-local `/home/z/litellm.yml`, so replace it. If no models are produced, the script exits instead of writing an empty `model_list`.
 
 ## What it can do now
 
@@ -67,7 +67,28 @@ The provider endpoint is used when `roster:` asks for it, or as a fallback when 
 - `models` — extra model names and per-model assertions.
 - `docs` — vendor pages with `roster`, `inline_code`, and `patterns` rules for mining model facts.
 
-Keep credentials in `CONFIG_PATH` outside the repository; it is deliberately not versioned.
+A group in full, as a shape rather than a real provider:
+
+```yaml
+# lm.yml — one key per provider group. It holds credentials, so it is not versioned.
+myprovider:                              # the group name is the alias prefix: myprovider/<model>
+  openai: https://api.example.com/v1      # the provider's API base
+  style: openai                           # prefix for litellm_params.model; defaults to the group name
+  keys:
+    main: <your-api-key>                  # omit for keyless endpoints
+  roster: [backup, catalog]               # only these channels may decide membership
+  models:
+    some-model: {max_output_tokens: 128000}   # extra name and/or assertions; wins over every source
+  docs:
+    - url: https://docs.example.com/models
+      roster: ['(?P<name>model-[\d.]+)']   # names the page declares for itself
+      inline_code: ['model-[\d.]+']        # fullmatch on spans the page marks as literal ids
+      units: {'k': 1000}                   # multipliers for a rule's `unit` group
+      patterns:
+        - {field: max_input_tokens, pattern: '(?P<value>\d+)\s*context'}   # `value` is the fact
+```
+
+Unknown keys inside a group are printed and ignored; a misspelled key inside `docs` or `patterns` is a config error. Keep credentials in `CONFIG_PATH` outside the repository; it is deliberately not versioned.
 
 ## Architecture
 
@@ -130,4 +151,4 @@ Adding a provider or a model should stay a small YAML edit, not a hunt through f
 
 ## License
 
-[AGPL-3.0](LICENSE.md).
+[AGPL-3.0](LICENSE.md) © 2026 ZisIsNotZis.
