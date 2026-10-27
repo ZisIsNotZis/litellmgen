@@ -5,7 +5,17 @@ node_modules/
 .tmp/
 worktrees/
 .worktrees/
+.venv/
+dist/
+build/
+*.egg-info/
 .DS_Store
+
+# Editor and OS noise
+*~
+*.swp
+*.swo
+*.bak
 
 # Local secrets, test caches, and generated logs
 .pytest_cache/
