@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="logo-title logo-desc">
+  <title id="logo-title">litellmgen</title>
+  <desc id="logo-desc">Three colored sources merging into one normalized configuration.</desc>
+  <defs>
+    <linearGradient id="bg" x1="24" y1="16" x2="232" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#141B2D"/>
+      <stop offset="1" stop-color="#070A12"/>
+    </linearGradient>
+    <linearGradient id="gate" x1="128" y1="88" x2="128" y2="168" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38BDF8"/>
+      <stop offset="0.52" stop-color="#818CF8"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect x="6" y="6" width="244" height="244" rx="56" fill="url(#bg)"/>
+  <rect x="6.75" y="6.75" width="242.5" height="242.5" rx="55.25" fill="none" stroke="#FFFFFF" stroke-opacity=".09" stroke-width="1.5"/>
+
+  <!-- Three sources converge on one merge gate. -->
+  <path d="M54 78 C 91 78, 97 128, 121 128" fill="none" stroke="#22D3EE" stroke-width="12" stroke-linecap="round"/>
+  <path d="M54 128 H 121" fill="none" stroke="#A78BFA" stroke-width="12" stroke-linecap="round"/>
+  <path d="M54 178 C 91 178, 97 128, 121 128" fill="none" stroke="#FBBF24" stroke-width="12" stroke-linecap="round"/>
+
+  <circle cx="54" cy="78" r="7" fill="#22D3EE"/>
+  <circle cx="54" cy="128" r="7" fill="#A78BFA"/>
+  <circle cx="54" cy="178" r="7" fill="#FBBF24"/>
+
+  <!-- The normalized output: one config, one line. -->
+  <rect x="121" y="94" width="20" height="68" rx="10" fill="url(#gate)" filter="url(#glow)"/>
+  <path d="M141 128 H 190" fill="none" stroke="#E2E8F0" stroke-width="12" stroke-linecap="round"/>
+  <path d="M184 112 L 204 128 L 184 144" fill="none" stroke="#E2E8F0" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
