@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="litellmgen 图标" width="132">
+  <a href="README.md">English</a> · <a href="README.zh-CN.md"><strong>简体中文</strong></a>
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md"><strong>简体中文</strong></a>
+  <img src="assets/logo.svg" alt="litellmgen 图标" width="132">
 </p>
 
 <h1 align="center">litellmgen</h1>
@@ -24,13 +24,13 @@ cd litellmgen
 python3 -m pip install aiohttp pydantic PyYAML
 ```
 
-打开 `litellmgen.py`，把顶部的 `BACKUP_PATH`、`CONFIG_PATH`、`OUTPUT_PATH` 改成你机器上的路径。`BACKUP_PATH` 应指向已安装的 LiteLLM 里那份 `model_prices_and_context_window_backup.json`。然后运行：
+打开 `litellmgen.py`，把顶部的 `BACKUP_PATH`、`CONFIG_PATH`、`OUTPUT_PATH` 改成你机器上的路径。`BACKUP_PATH` 应指向已安装的 LiteLLM 里那份 `model_prices_and_context_window_backup.json`，`CONFIG_PATH` 指向你自己的 `lm.yml`（写法见下文[配置结构](#配置结构)）。然后运行：
 
 ```bash
 python3 litellmgen.py
 ```
 
-生成的 router 配置写到 `OUTPUT_PATH`，默认是 `~/litellm.yml`。如果最后没有算出任何模型，脚本会直接退出，不会写出一个空的 `model_list`。
+生成的 router 配置写到 `OUTPUT_PATH`；仓库里预置的是作者本机的 `/home/z/litellm.yml`，记得改掉。如果最后没有算出任何模型，脚本会直接退出，不会写出一个空的 `model_list`。
 
 ## 现在能做什么
 
@@ -67,7 +67,28 @@ provider 端点只在 `roster:` 要求时使用，或者在两个 LiteLLM 来源
 - `models`：额外模型名和逐模型断言。
 - `docs`：厂商页面，以及 `roster`、`inline_code`、`patterns` 这套抽取规则。
 
-凭据只放在仓库外的 `CONFIG_PATH` 里；这个文件故意不纳入版本控制。
+下面是某个组完整的写法，只表示形状，不对应任何真实 provider：
+
+```yaml
+# lm.yml —— 每个 provider 组一个顶层键。里面有凭据，所以不纳入版本控制。
+myprovider:                              # 组名就是别名前缀：myprovider/<model>
+  openai: https://api.example.com/v1      # provider 的 API base
+  style: openai                           # 写进 litellm_params.model 的前缀，默认等于组名
+  keys:
+    main: <你的 API key>                   # 不需要 key 的端点可以不写
+  roster: [backup, catalog]               # 只有这些通道能决定成员
+  models:
+    some-model: {max_output_tokens: 128000}   # 补充模型名/字段断言，优先级高于所有来源
+  docs:
+    - url: https://docs.example.com/models
+      roster: ['(?P<name>model-[\d.]+)']   # 页面自己声明的模型名
+      inline_code: ['model-[\d.]+']        # 对页面标为字面 id 的 span 做 fullmatch
+      units: {'k': 1000}                   # 规则里 `unit` 分组的换算倍数
+      patterns:
+        - {field: max_input_tokens, pattern: '(?P<value>\d+)\s*上下文'}   # `value` 就是取到的事实
+```
+
+组里没实现的键会打印出来并忽略；但 `docs` 或 `patterns` 里拼错键名会被当成配置错误。凭据只放在仓库外的 `CONFIG_PATH` 里；这个文件故意不纳入版本控制。
 
 ## 架构
 
@@ -130,4 +151,4 @@ python3 litellmgen.py                 # 需要本机路径和网络
 
 ## 许可证
 
-[AGPL-3.0](LICENSE.md)。
+[AGPL-3.0](LICENSE.md) © 2026 ZisIsNotZis。
