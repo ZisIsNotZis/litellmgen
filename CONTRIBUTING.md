@@ -8,7 +8,7 @@ This is a small, closed utility: one script that generates a LiteLLM model confi
 - Preserve the core semantics: one flat `Facts` shape, per-field source priority, `None` as "no opinion", and no fabricated `false` values.
 - Keep `litellmgen.py` a single implementation file unless there is a concrete need to split it.
 - Do not add a stable CLI, a test runner, or portable config paths as incidental changes; those are deliberately out of scope.
-- Never commit API keys, Copilot tokens, `lm.yml`, or generated configs containing credentials.
+- Never commit API keys, Copilot tokens, your config file, or generated configs containing credentials.
 
 ## Verifying
 
